@@ -1,8 +1,20 @@
-# Worker Telegram → Groq → PDF
+# Worker de Teste - Telegram → Groq → DOCX
 
-Versão 10.0.0.
+Versão 12.0.0.
 
-Gera PDF, remove timestamps, não duplica transcrição em áudio português e destaca apenas frases importantes com negrito seletivo.
+Gera arquivo DOCX editável para abrir no Google Docs.
+
+Estrutura:
+
+```txt
+HOOK
+BODY
+CTA
+```
+
+Sem negrito automático.
+Sem timestamps.
+Sem duplicar transcrição original em áudio português.
 
 ## Health
 
@@ -15,5 +27,5 @@ Abra:
 Precisa mostrar:
 
 ```json
-{"version": "10.0.0", "output_format": "pdf"}
+{"version": "12.0.0", "output_format": "docx"}
 ```

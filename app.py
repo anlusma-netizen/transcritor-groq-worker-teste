@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse, parse_qs
-from html import escape
 
 import requests
 import gdown
@@ -16,16 +15,15 @@ from fastapi import FastAPI, UploadFile, File, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from groq import Groq
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.enums import TA_CENTER
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "10.0.0"
+VERSION = "12.0.0"
 
-app = FastAPI(title="Worker Telegram → Groq → PDF", version=VERSION)
+app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -59,9 +57,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 def root():
     return {
         "ok": True,
-        "service": "transcritor-groq-worker",
+        "service": "transcritor-groq-worker-teste",
         "version": VERSION,
-        "output_format": "pdf",
+        "output_format": "docx",
+        "copy_structure": "hook_body_cta",
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -77,7 +76,8 @@ def health():
         "translation_model": GROQ_TRANSLATION_MODEL,
         "translation_chunk_chars": TRANSLATION_CHUNK_CHARS,
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
-        "output_format": "pdf",
+        "output_format": "docx",
+        "copy_structure": "hook_body_cta",
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -139,7 +139,7 @@ def download_google_drive_or_url(url: str, output_path: Path):
 
 def download_telegram_file(file_id: str, output_path: Path):
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN não configurado no Railway.")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN não configurado no Railway de teste.")
 
     info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
     info = requests.get(info_url, params={"file_id": file_id}, timeout=60).json()
@@ -167,20 +167,6 @@ def convert_to_audio(input_path: Path, output_path: Path):
 
 def file_mb(path: Path) -> float:
     return path.stat().st_size / (1024 * 1024)
-
-
-def get_duration_seconds(path: Path) -> float:
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    result = run_cmd(cmd)
-    try:
-        return float(result.stdout.strip())
-    except Exception:
-        return 0.0
 
 
 def split_audio(input_audio: Path, chunks_dir: Path, chunk_seconds: int = 600) -> List[Path]:
@@ -288,7 +274,7 @@ def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Você é especialista em tradução fiel e organização de copy, VSL e cartas de vendas em português brasileiro.",
+                        "content": "Você organiza transcrições de anúncios, VSLs e cartas de vendas com fidelidade, sem reescrever criativamente.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -316,7 +302,7 @@ def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
     raise RuntimeError(f"Falha ao processar bloco {index}/{total}: {last_error}")
 
 
-def prepare_final_text_for_pdf(text: str, source_is_portuguese: bool) -> str:
+def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
     if not text.strip():
         return ""
 
@@ -326,43 +312,58 @@ def prepare_final_text_for_pdf(text: str, source_is_portuguese: bool) -> str:
     for i, part in enumerate(parts, start=1):
         if source_is_portuguese:
             prompt = f"""
-Organize o bloco {i}/{len(parts)} abaixo em português brasileiro para virar um PDF de estudo de copy/VSL/carta de vendas.
+Organize o bloco {i}/{len(parts)} abaixo em português brasileiro para virar um DOCX editável de estudo de copy/VSL/anúncio.
 
-Regras:
+Regras obrigatórias:
 - O texto já está em português. Não traduza.
 - Não resuma.
-- Não reescreva criativamente.
+- Não melhore a copy.
+- Não adicione argumentos.
+- Não invente nada.
 - Preserve o máximo possível as palavras originais.
-- Apenas limpe pontuação quando necessário e quebre em parágrafos fáceis de ler.
-- Não inclua timestamps.
-- Não repita o texto.
-- Use **negrito** somente em poucas frases realmente importantes: promessa central, mecanismo, prova, dor principal, grande objeção, oferta e chamada para ação.
-- Não coloque negrito em tudo.
-- Entregue apenas o texto final.
+- Remova apenas timestamps, se aparecerem.
+- Não use negrito.
+- Não use markdown.
+- Apenas separe o conteúdo nestas 3 seções:
+  HOOK:
+  BODY:
+  CTA:
+- Se não houver CTA claro neste bloco, escreva:
+  CTA:
+  [não identificado neste trecho]
+- Entregue apenas o texto estruturado.
 
 Texto:
 {part}
 """.strip()
         else:
             prompt = f"""
-Traduza o bloco {i}/{len(parts)} abaixo para português brasileiro e organize para virar um PDF de estudo de copy/VSL/carta de vendas.
+Traduza o bloco {i}/{len(parts)} abaixo para português brasileiro e organize para virar um DOCX editável de estudo de copy/VSL/anúncio.
 
-Regras:
-- Mantenha máxima fidelidade ao texto original.
+Regras obrigatórias:
+- Traduza com máxima fidelidade.
 - Não resuma.
 - Não melhore a copy.
 - Não adicione argumentos.
-- Preserve repetições, promessas, ganchos, CTAs e estrutura de VSL/anúncio.
-- Não inclua timestamps.
-- Use **negrito** somente em poucas frases realmente importantes: promessa central, mecanismo, prova, dor principal, grande objeção, oferta e chamada para ação.
-- Não coloque negrito em tudo.
-- Entregue apenas o texto final traduzido.
+- Não invente nada.
+- Preserve repetições, promessas, ganchos, CTAs e estrutura do anúncio.
+- Remova apenas timestamps, se aparecerem.
+- Não use negrito.
+- Não use markdown.
+- Apenas separe o conteúdo nestas 3 seções:
+  HOOK:
+  BODY:
+  CTA:
+- Se não houver CTA claro neste bloco, escreva:
+  CTA:
+  [não identificado neste trecho]
+- Entregue apenas o texto traduzido e estruturado.
 
 Texto:
 {part}
 """.strip()
 
-        print(f"Processando bloco {i}/{len(parts)} para PDF...")
+        print(f"Organizando bloco {i}/{len(parts)} em Hook/Body/CTA...")
         final_parts.append(run_llm_with_retry(prompt, i, len(parts)))
 
         if i < len(parts):
@@ -371,96 +372,111 @@ Texto:
     return "\n\n".join(final_parts).strip()
 
 
-def markdown_bold_to_reportlab(text: str) -> str:
-    text = escape(text)
-    parts = text.split("**")
-    out = []
-    bold = False
+def parse_hook_body_cta(structured_text: str) -> Dict[str, List[str]]:
+    sections = {"HOOK": [], "BODY": [], "CTA": []}
+    current = "BODY"
 
-    for part in parts:
-        out.append(f"<b>{part}</b>" if bold else part)
-        bold = not bold
+    for raw_line in structured_text.splitlines():
+        line = raw_line.strip()
+        upper = line.upper().strip()
 
-    return "".join(out).replace("\n", "<br/>")
+        if upper in {"HOOK", "HOOK:"}:
+            current = "HOOK"
+            continue
+        if upper in {"BODY", "BODY:"}:
+            current = "BODY"
+            continue
+        if upper in {"CTA", "CTA:"}:
+            current = "CTA"
+            continue
+
+        if line:
+            sections[current].append(line)
+
+    return sections
 
 
-def pdf_footer(canvas, doc):
-    canvas.saveState()
-    canvas.setFont("Helvetica", 8)
-    canvas.drawRightString(A4[0] - 1.8 * cm, 1.2 * cm, f"Página {doc.page}")
-    canvas.restoreState()
+def setup_docx_styles(doc: Document):
+    styles = doc.styles
+
+    normal = styles["Normal"]
+    normal.font.name = "Arial"
+    normal.font.size = Pt(11)
+
+    for style_name in ["Title", "Heading 1", "Heading 2"]:
+        style = styles[style_name]
+        style.font.name = "Arial"
+
+    styles["Title"].font.size = Pt(20)
+    styles["Title"].font.bold = True
+
+    styles["Heading 1"].font.size = Pt(16)
+    styles["Heading 1"].font.bold = True
+    styles["Heading 1"].font.color.rgb = RGBColor(0, 0, 0)
+
+    styles["Heading 2"].font.size = Pt(13)
+    styles["Heading 2"].font.bold = True
+    styles["Heading 2"].font.color.rgb = RGBColor(0, 0, 0)
 
 
-def create_pdf(original_name: str, transcription: Dict[str, Any], final_text: str, output_path: Path, include_original: bool):
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=A4,
-        rightMargin=2 * cm,
-        leftMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm,
-        title="Transcrição em PT-BR - Copy/VSL",
-    )
+def add_paragraphs(doc: Document, lines: List[str]):
+    text = "\n".join(lines).strip()
+    if not text:
+        text = "[não identificado neste trecho]"
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "TitleCustom",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=18,
-        leading=22,
-        alignment=TA_CENTER,
-        spaceAfter=18,
-    )
-    h2_style = ParagraphStyle(
-        "H2Custom",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        leading=16,
-        spaceBefore=14,
-        spaceAfter=8,
-    )
-    body_style = ParagraphStyle(
-        "BodyCustom",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=10.5,
-        leading=15,
-        spaceAfter=8,
-    )
-    meta_style = ParagraphStyle(
-        "MetaCustom",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=12,
-        spaceAfter=4,
-    )
-
-    story = []
-    story.append(Paragraph("Transcrição em PT-BR - Copy/VSL", title_style))
-    story.append(Paragraph(f"<b>Arquivo:</b> {escape(original_name)}", meta_style))
-    story.append(Paragraph(f"<b>Idioma detectado:</b> {escape(str(transcription.get('language') or 'não identificado'))}", meta_style))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("Texto final", h2_style))
-
-    paragraphs = [p.strip() for p in final_text.split("\n\n") if p.strip()]
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
-        paragraphs = ["Sem texto final disponível."]
+        paragraphs = [text]
 
-    for p in paragraphs:
-        story.append(Paragraph(markdown_bold_to_reportlab(p), body_style))
+    for paragraph_text in paragraphs:
+        p = doc.add_paragraph(style="Normal")
+        p.paragraph_format.space_after = Pt(8)
+        p.paragraph_format.line_spacing = 1.15
+        p.add_run(paragraph_text)
+
+
+def create_docx(original_name: str, transcription: Dict[str, Any], structured_text: str, output_path: Path, include_original: bool):
+    doc = Document()
+    setup_docx_styles(doc)
+
+    section = doc.sections[0]
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
+    section.left_margin = Inches(0.75)
+    section.right_margin = Inches(0.75)
+
+    title = doc.add_paragraph(style="Title")
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title.add_run("Transcrição PT-BR - Estrutura da Copy")
+
+    meta = doc.add_paragraph(style="Normal")
+    meta.add_run("Arquivo: ").bold = True
+    meta.add_run(original_name)
+
+    meta2 = doc.add_paragraph(style="Normal")
+    meta2.add_run("Idioma detectado: ").bold = True
+    meta2.add_run(str(transcription.get("language") or "não identificado"))
+
+    doc.add_paragraph("")
+
+    sections = parse_hook_body_cta(structured_text)
+
+    for heading in ["HOOK", "BODY", "CTA"]:
+        doc.add_heading(heading, level=1)
+        add_paragraphs(doc, sections.get(heading, []))
 
     if include_original:
         original_text = transcription.get("text", "") or ""
         if original_text.strip():
-            story.append(PageBreak())
-            story.append(Paragraph("Transcrição original", h2_style))
-            for p in [x.strip() for x in original_text.split("\n\n") if x.strip()]:
-                story.append(Paragraph(markdown_bold_to_reportlab(p), body_style))
+            doc.add_page_break()
+            doc.add_heading("TRANSCRIÇÃO ORIGINAL", level=1)
+            for p_text in [x.strip() for x in original_text.split("\n\n") if x.strip()]:
+                p = doc.add_paragraph(style="Normal")
+                p.paragraph_format.space_after = Pt(8)
+                p.paragraph_format.line_spacing = 1.15
+                p.add_run(p_text)
 
-    doc.build(story, onFirstPage=pdf_footer, onLaterPages=pdf_footer)
+    doc.save(output_path)
 
 
 def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
@@ -470,23 +486,27 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
     transcription = transcribe_audio(audio_path, workdir)
     source_is_portuguese = is_portuguese_language(transcription.get("language"))
 
-    final_text = prepare_final_text_for_pdf(
+    structured_text = prepare_structured_text(
         transcription.get("text", ""),
         source_is_portuguese=source_is_portuguese,
     )
 
     include_original = INCLUDE_ORIGINAL_FOR_NON_PT and not source_is_portuguese
 
-    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_ptbr.pdf"
+    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_hook_body_cta.docx"
     output_path = workdir / output_name
-    create_pdf(original_name, transcription, final_text, output_path, include_original=include_original)
+    create_docx(original_name, transcription, structured_text, output_path, include_original=include_original)
     return output_path
 
 
 def persistent_file_response(output_path: Path) -> FileResponse:
     final_path = Path(tempfile.gettempdir()) / output_path.name
     shutil.copy(output_path, final_path)
-    return FileResponse(final_path, filename=output_path.name, media_type="application/pdf")
+    return FileResponse(
+        final_path,
+        filename=output_path.name,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 @app.post("/process-telegram-media")
