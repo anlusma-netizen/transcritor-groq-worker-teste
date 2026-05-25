@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "12.0.0"
+VERSION = "13.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -61,6 +61,7 @@ def root():
         "version": VERSION,
         "output_format": "docx",
         "copy_structure": "hook_body_cta",
+        "concurrency_fix": true,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -78,6 +79,7 @@ def health():
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
         "output_format": "docx",
         "copy_structure": "hook_body_cta",
+        "concurrency_fix": true,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -532,7 +534,7 @@ async def process_telegram_media(request: Request, file: Optional[UploadFile] = 
 
 
 @app.post("/process-source")
-async def process_source(payload: Dict[str, Any]):
+def process_source(payload: Dict[str, Any]):
     source_type = payload.get("sourceType")
     original_name = payload.get("fileName") or "arquivo"
 
