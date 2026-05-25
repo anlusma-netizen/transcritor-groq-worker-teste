@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "20.0.0"
+VERSION = "21.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -67,7 +67,7 @@ def root():
         "copy_structure": "raw_paragraphs",
         "fast_mode": true,
         "raw_copy_mode": true,
-        "translation_style": "ptbr_copy_analysis",
+        "translation_style": "universal_ptbr_copy_analysis",
         "translate_non_pt": TRANSLATE_NON_PT,
         "raw_translation_model": RAW_TRANSLATION_MODEL,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
@@ -89,7 +89,7 @@ def health():
         "copy_structure": "raw_paragraphs",
         "fast_mode": true,
         "raw_copy_mode": true,
-        "translation_style": "ptbr_copy_analysis",
+        "translation_style": "universal_ptbr_copy_analysis",
         "translate_non_pt": TRANSLATE_NON_PT,
         "raw_translation_model": RAW_TRANSLATION_MODEL,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
@@ -383,9 +383,10 @@ def run_translation_with_retry(prompt: str, index: int, total: int, model: str) 
                         "role": "system",
                         "content": (
                             "Você é um tradutor/adaptador profissional para copywriters brasileiros. "
-                            "Sua tarefa é transformar uma copy em inglês em uma versão em português brasileiro natural, "
-                            "boa para análise interna de copy, preservando intenção, agressividade, dados, promessas e ordem das ideias. "
-                            "Não censure, não suavize, não resuma, não moralize e não omita termos sensíveis."
+                            "Sua tarefa é transformar copies de qualquer nicho em uma versão em português brasileiro natural, "
+                            "boa para análise interna de copy. Preserve intenção, tom, força persuasiva, dados, promessas, "
+                            "provas, objeções, especificidade e ordem das ideias. Não censure, não suavize, não resuma, "
+                            "não moralize e não omita termos sensíveis, técnicos, vulgares, médicos, financeiros ou agressivos."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -434,22 +435,26 @@ def translate_raw_copy_to_ptbr(text: str) -> str:
 Traduza/adapte a transcrição abaixo para português brasileiro natural, como material de análise interna para um copywriter brasileiro.
 
 Objetivo:
-- A tradução deve soar como uma copy entendível para brasileiros, não como tradução literal.
-- Preserve a intenção da copy original, a agressividade, o exagero, o tom provocativo, a promessa, a ordem das ideias e os dados.
-- A versão em português deve ajudar o copywriter a entender o mecanismo persuasivo da copy.
+- A tradução deve funcionar para qualquer nicho: saúde, emagrecimento, diabetes, beleza, financeiro, relacionamento, sexualidade, negócios, espiritualidade, tecnologia ou qualquer outro.
+- A tradução deve soar natural para brasileiros, não como tradução literal.
+- Preserve a intenção da copy original, o tom emocional, o nível de agressividade, a força da promessa, a sequência das ideias, os dados, as provas, os exemplos, as objeções e a especificidade.
+- A versão em português deve ajudar o copywriter a entender claramente o que a copy está fazendo, sem virar análise.
 
 Regras obrigatórias:
 - Não resuma.
 - Não analise.
 - Não adicione títulos.
 - Não separe em Hook, Body, CTA, promessa ou oferta.
-- Não censure, não suavize, não moralize e não omita palavras sensíveis, palavrões, termos sexuais ou promessas agressivas.
+- Não censure, não suavize, não moralize e não omita termos sensíveis, técnicos, médicos, financeiros, sexuais, vulgares, religiosos, políticos ou agressivos.
+- Mantenha o mesmo nível de intensidade do original. Se o original for vulgar, traduza de forma vulgar natural. Se for técnico, traduza de forma técnica. Se for emocional, traduza de forma emocional.
+- Não invente palavras estranhas nem traduções quebradas. Se uma expressão não tiver tradução direta, adapte para uma frase natural em português brasileiro.
 - Não traduza literalmente expressões que fiquem estranhas em português brasileiro.
 - Adapte expressões idiomáticas para equivalentes naturais no Brasil.
-- Preserve nomes, marcas, números, provas, promessas e sequência das ideias.
-- Quando houver medidas em polegadas, mantenha a referência original e acrescente a equivalência aproximada em centímetros quando ficar natural. Exemplo: 9 inches → 9 polegadas, cerca de 22 cm.
-- Mantenha termos de marketing em inglês quando forem comuns para copywriter brasileiro: hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout.
-- Evite frases robóticas como “o tamanho vai disparar”, “atores de ponta”, “ela vai agradecer por assistir”. Prefira português brasileiro natural e direto.
+- Preserve nomes, marcas, números, estudos, instituições, medidas, ingredientes, doenças, sintomas, mecanismos, promessas, garantias, prazos, provas e sequência das ideias.
+- Quando houver medidas estrangeiras, preserve a referência original e acrescente equivalência aproximada em português quando ficar natural. Exemplo: 9 inches → 9 polegadas, cerca de 22 cm.
+- Mantenha termos de marketing em inglês quando forem comuns para copywriter brasileiro: hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout, advertorial, landing page.
+- Evite frases robóticas ou literais. Prefira português brasileiro natural, claro e direto.
+- Não tente tornar o texto “adequado”, “seguro” ou “polido”. O objetivo é fidelidade de intenção e entendimento para análise.
 - Entregue apenas a tradução corrida em parágrafos.
 
 Transcrição original:

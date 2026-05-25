@@ -1,13 +1,14 @@
-# Worker de Teste - v20 Tradução para Análise PT-BR
+# Worker de Teste - v21 Tradução Universal para Análise PT-BR
 
-Versão 20.0.0.
+Versão 21.0.0.
 
 Objetivo:
 - Cópia crua, sem Hook/Body/CTA.
-- Parágrafos maiores e mais enxutos.
-- Tradução adaptada para análise de copy em português brasileiro.
-- Preserva intenção, promessa, agressividade, ordem das ideias, dados, nomes e termos sensíveis.
-- Mantém transcrição original no final quando o áudio não for português.
+- Tradução adaptada para análise em português brasileiro.
+- Funciona para qualquer nicho: saúde, emagrecimento, diabetes, beleza, financeiro, sexualidade, negócios, espiritualidade, tecnologia etc.
+- Preserva tom, intensidade, promessa, dados, provas, termos técnicos, termos sensíveis e ordem das ideias.
+- Não censura, não suaviza, não resume e não moraliza.
+- Parágrafos maiores e mais legíveis.
 
 ## Saída em português
 
@@ -31,23 +32,14 @@ PARAGRAPH_SENTENCES=5
 PARAGRAPH_MAX_CHARS=1400
 ```
 
-## Modelos para testar em RAW_TRANSLATION_MODEL
-
-```txt
-meta-llama/llama-4-scout-17b-16e-instruct
-llama-3.3-70b-versatile
-openai/gpt-oss-20b
-openai/gpt-oss-120b
-```
-
 ## Health
 
 Precisa mostrar:
 
 ```json
 {
-  "version": "20.0.0",
+  "version": "21.0.0",
   "raw_copy_mode": true,
-  "translation_style": "ptbr_copy_analysis"
+  "translation_style": "universal_ptbr_copy_analysis"
 }
 ```
