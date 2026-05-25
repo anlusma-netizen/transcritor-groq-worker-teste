@@ -1,18 +1,35 @@
-# Worker de Teste - Telegram → Groq → DOCX Rápido
+# Worker de Teste - v16 VSL + Tradução PT-BR
 
-Versão 15.0.0.
+Versão 16.0.0.
 
-Modo rápido:
-- transcreve com Groq Whisper
-- gera DOCX imediatamente
-- não usa IA extra para organizar
-- divide em HOOK / BODY / CTA por posição do texto
-- muito mais rápido que a versão com análise inteligente
+Objetivo:
+- Criativos curtos continuam rápidos.
+- VSL/copy longa sai em formato de mapa de copy.
+- Áudios em inglês/outros idiomas geram versão traduzida/adaptada em PT-BR.
+- A transcrição original entra no final quando o áudio não for português.
 
-Observação:
-- A estrutura Hook/Body/CTA é aproximada.
-- Para máxima precisão de copy, use a versão inteligente.
-- Para velocidade, use esta.
+## Saída para criativos curtos
+
+```txt
+HOOK
+BODY
+CTA
+TRANSCRIÇÃO LIMPA COMPLETA
+```
+
+## Saída para VSL / copy longa
+
+```txt
+ABERTURA / HOOK
+PROBLEMA / DOR
+PROMESSA / TRANSFORMAÇÃO
+MECANISMO / SOLUÇÃO
+PROVAS / AUTORIDADE
+OFERTA / BENEFÍCIO CENTRAL
+OBJEÇÕES / GARANTIA / RISCO
+CTA / FECHAMENTO
+TRANSCRIÇÃO LIMPA COMPLETA
+```
 
 ## Health
 
@@ -25,5 +42,15 @@ Abra:
 Precisa mostrar:
 
 ```json
-{"version": "15.0.0", "output_format": "docx", "fast_mode": true}
+{
+  "version": "16.0.0",
+  "output_format": "docx",
+  "vsl_mode": true,
+  "translation_for_non_pt": true
+}
 ```
+
+## Observação
+
+Português é processado rápido, sem etapa extra de tradução.
+Áudio em inglês/outro idioma usa IA de texto para traduzir/adaptar, então demora mais.

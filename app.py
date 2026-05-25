@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "15.0.0"
+VERSION = "16.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -60,8 +60,10 @@ def root():
         "service": "transcritor-groq-worker-teste",
         "version": VERSION,
         "output_format": "docx",
-        "copy_structure": "hook_body_cta_fast",
+        "copy_structure": "creative_fast_or_vsl_map",
         "fast_mode": true,
+        "vsl_mode": true,
+        "translation_for_non_pt": true,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -78,8 +80,10 @@ def health():
         "translation_chunk_chars": TRANSLATION_CHUNK_CHARS,
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
         "output_format": "docx",
-        "copy_structure": "hook_body_cta_fast",
+        "copy_structure": "creative_fast_or_vsl_map",
         "fast_mode": true,
+        "vsl_mode": true,
+        "translation_for_non_pt": true,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -305,72 +309,172 @@ def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
 
 
 
-def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
-    """
-    Modo rápido: não usa LLM depois da transcrição.
-    Para ganhar velocidade, só limpa timestamps simples e divide o texto em HOOK/BODY/CTA por posição.
-    Não traduz. Para idioma estrangeiro, retorna a transcrição original estruturada rapidamente.
-    """
-    text = (text or "").strip()
-    if not text:
-        return "HOOK:\n[não identificado]\n\nBODY:\n[não identificado]\n\nCTA:\n[não identificado]"
 
-    # Remove timestamps comuns se aparecerem: [00:01], 00:01, 00:01:20
+def looks_like_long_vsl(text: str) -> bool:
+    words = re.findall(r"\w+", text or "", flags=re.UNICODE)
+    # VSL normalmente passa disso; criativo curto fica abaixo.
+    return len(words) >= 260
+
+
+def clean_transcript_text(text: str) -> str:
+    text = (text or "").strip()
     text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
     text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-    # Quebra em frases, preservando a ordem.
+
+def split_sentences(text: str) -> List[str]:
+    text = clean_transcript_text(text)
+    if not text:
+        return []
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    sentences = [s.strip() for s in sentences if s.strip()]
+    return [s.strip() for s in sentences if s.strip()]
 
+
+def join_sentences(items: List[str]) -> str:
+    return " ".join([x.strip() for x in items if x.strip()]).strip() or "[não identificado neste trecho]"
+
+
+def translate_to_ptbr_natural(text: str) -> str:
+    """
+    Tradução/adaptação natural para PT-BR.
+    Usa LLM somente quando o áudio não é português.
+    """
+    text = clean_transcript_text(text)
+    if not text:
+        return ""
+
+    parts = split_text_for_llm(text, TRANSLATION_CHUNK_CHARS)
+    translated_parts = []
+
+    for i, part in enumerate(parts, start=1):
+        prompt = f"""
+Traduza/adapte o trecho {i}/{len(parts)} abaixo para português brasileiro natural.
+
+Regras:
+- Não resuma.
+- Não invente.
+- Não melhore a copy.
+- Preserve o sentido, promessas, objeções, provas, CTA e ordem das ideias.
+- Não faça tradução literal robótica.
+- Use português brasileiro claro, natural e útil para um copywriter entender.
+- Mantenha termos de marketing em inglês quando forem comuns no Brasil, como hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout, criativo, se fizer sentido.
+- Se houver nomes de produto, marca, pessoa, método ou valores, preserve.
+- Entregue apenas o texto traduzido/adaptado.
+
+Texto original:
+{part}
+""".strip()
+        translated_parts.append(run_llm_with_retry(prompt, i, len(parts)))
+
+        if i < len(parts):
+            time.sleep(TRANSLATION_DELAY_SECONDS)
+
+    return "\n\n".join(translated_parts).strip()
+
+
+def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
+    """
+    v16:
+    - Português: rápido, sem LLM.
+    - Não português: traduz/adapta para PT-BR e depois estrutura.
+    - Criativo curto: HOOK/BODY/CTA.
+    - VSL longa: mapa de VSL com seções menores + transcrição completa.
+    """
+    base_text = clean_transcript_text(text)
+    if not base_text:
+        return "MODE: CREATIVE\n\nHOOK:\n[não identificado]\n\nBODY:\n[não identificado]\n\nCTA:\n[não identificado]"
+
+    if source_is_portuguese:
+        working_text = base_text
+        original_language_note = ""
+    else:
+        working_text = translate_to_ptbr_natural(base_text)
+        original_language_note = "Texto abaixo traduzido/adaptado para PT-BR. A transcrição original fica no final do DOCX."
+
+    sentences = split_sentences(working_text)
     if not sentences:
-        sentences = [text]
+        sentences = [working_text]
 
     n = len(sentences)
 
-    if n <= 3:
-        hook = sentences[:1]
-        body = sentences[1:2] if n >= 2 else []
-        cta = sentences[2:] if n >= 3 else []
-    else:
-        hook_end = max(1, round(n * 0.18))
-        cta_start = max(hook_end + 1, round(n * 0.82))
-        hook = sentences[:hook_end]
-        body = sentences[hook_end:cta_start]
-        cta = sentences[cta_start:]
+    if not looks_like_long_vsl(working_text):
+        if n <= 3:
+            hook = sentences[:1]
+            body = sentences[1:2] if n >= 2 else []
+            cta = sentences[2:] if n >= 3 else []
+        else:
+            hook_end = max(1, round(n * 0.18))
+            cta_start = max(hook_end + 1, round(n * 0.82))
+            hook = sentences[:hook_end]
+            body = sentences[hook_end:cta_start]
+            cta = sentences[cta_start:]
 
-    if not body:
-        body = ["[não identificado neste trecho]"]
-    if not cta:
-        cta = ["[não identificado neste trecho]"]
+        return (
+            "MODE: CREATIVE\n\n"
+            + (f"OBSERVAÇÃO:\n{original_language_note}\n\n" if original_language_note else "")
+            + "HOOK:\n" + join_sentences(hook) +
+            "\n\nBODY:\n" + join_sentences(body) +
+            "\n\nCTA:\n" + join_sentences(cta) +
+            "\n\nTRANSCRIÇÃO LIMPA COMPLETA:\n" + working_text
+        )
 
-    return (
-        "HOOK:\n" + " ".join(hook).strip() +
-        "\n\nBODY:\n" + " ".join(body).strip() +
-        "\n\nCTA:\n" + " ".join(cta).strip()
-    )
+    # Mapa VSL por blocos proporcionais.
+    # Isso evita BODY gigante.
+    ranges = [
+        ("ABERTURA / HOOK", 0.00, 0.08),
+        ("PROBLEMA / DOR", 0.08, 0.22),
+        ("PROMESSA / TRANSFORMAÇÃO", 0.22, 0.34),
+        ("MECANISMO / SOLUÇÃO", 0.34, 0.52),
+        ("PROVAS / AUTORIDADE", 0.52, 0.68),
+        ("OFERTA / BENEFÍCIO CENTRAL", 0.68, 0.82),
+        ("OBJEÇÕES / GARANTIA / RISCO", 0.82, 0.92),
+        ("CTA / FECHAMENTO", 0.92, 1.00),
+    ]
+
+    output = ["MODE: VSL"]
+    if original_language_note:
+        output += ["", "OBSERVAÇÃO:", original_language_note]
+
+    for title, start, end in ranges:
+        a = int(round(n * start))
+        b = int(round(n * end))
+        if b <= a:
+            b = min(n, a + 1)
+        section_sentences = sentences[a:b]
+        output += ["", f"{title}:", join_sentences(section_sentences)]
+
+    output += ["", "TRANSCRIÇÃO LIMPA COMPLETA:", working_text]
+    return "\n".join(output).strip()
 
 
-def parse_hook_body_cta(structured_text: str) -> Dict[str, List[str]]:
-    sections = {"HOOK": [], "BODY": [], "CTA": []}
-    current = "BODY"
+
+def parse_structured_sections(structured_text: str) -> Dict[str, List[str]]:
+    sections: Dict[str, List[str]] = {}
+    current = None
+
+    ignore_keys = {"MODE"}
 
     for raw_line in structured_text.splitlines():
         line = raw_line.strip()
-        upper = line.upper().strip()
-
-        if upper in {"HOOK", "HOOK:"}:
-            current = "HOOK"
-            continue
-        if upper in {"BODY", "BODY:"}:
-            current = "BODY"
-            continue
-        if upper in {"CTA", "CTA:"}:
-            current = "CTA"
+        if not line:
             continue
 
-        if line:
-            sections[current].append(line)
+        if line.endswith(":"):
+            key = line[:-1].strip()
+            if key.upper() not in ignore_keys:
+                current = key
+                sections.setdefault(current, [])
+            continue
+
+        if line.startswith("MODE:"):
+            continue
+
+        if current is None:
+            current = "OBSERVAÇÃO"
+            sections.setdefault(current, [])
+
+        sections[current].append(line)
 
     return sections
 
@@ -414,6 +518,11 @@ def add_paragraphs(doc: Document, lines: List[str]):
         p.add_run(paragraph_text)
 
 
+def detect_mode_from_structured(structured_text: str) -> str:
+    m = re.search(r"^MODE:\s*(\w+)", structured_text, flags=re.I | re.M)
+    return (m.group(1).upper() if m else "CREATIVE")
+
+
 def create_docx(original_name: str, transcription: Dict[str, Any], structured_text: str, output_path: Path, include_original: bool):
     doc = Document()
     setup_docx_styles(doc)
@@ -424,9 +533,12 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
     section.left_margin = Inches(0.75)
     section.right_margin = Inches(0.75)
 
+    mode = detect_mode_from_structured(structured_text)
+    title_text = "Mapa de VSL - Transcrição PT-BR" if mode == "VSL" else "Criativo - Transcrição PT-BR"
+
     title = doc.add_paragraph(style="Title")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title.add_run("Transcrição - Estrutura Rápida da Copy")
+    title.add_run(title_text)
 
     meta = doc.add_paragraph(style="Normal")
     meta.add_run("Arquivo: ").bold = True
@@ -436,13 +548,48 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
     meta2.add_run("Idioma detectado: ").bold = True
     meta2.add_run(str(transcription.get("language") or "não identificado"))
 
+    meta3 = doc.add_paragraph(style="Normal")
+    meta3.add_run("Modo: ").bold = True
+    meta3.add_run("VSL / Copy longa" if mode == "VSL" else "Criativo curto")
+
     doc.add_paragraph("")
 
-    sections = parse_hook_body_cta(structured_text)
+    sections = parse_structured_sections(structured_text)
 
-    for heading in ["HOOK", "BODY", "CTA"]:
-        doc.add_heading(heading, level=1)
-        add_paragraphs(doc, sections.get(heading, []))
+    preferred_vsl = [
+        "OBSERVAÇÃO",
+        "ABERTURA / HOOK",
+        "PROBLEMA / DOR",
+        "PROMESSA / TRANSFORMAÇÃO",
+        "MECANISMO / SOLUÇÃO",
+        "PROVAS / AUTORIDADE",
+        "OFERTA / BENEFÍCIO CENTRAL",
+        "OBJEÇÕES / GARANTIA / RISCO",
+        "CTA / FECHAMENTO",
+        "TRANSCRIÇÃO LIMPA COMPLETA",
+    ]
+
+    preferred_creative = [
+        "OBSERVAÇÃO",
+        "HOOK",
+        "BODY",
+        "CTA",
+        "TRANSCRIÇÃO LIMPA COMPLETA",
+    ]
+
+    preferred = preferred_vsl if mode == "VSL" else preferred_creative
+    used = set()
+
+    for heading in preferred:
+        if heading in sections:
+            doc.add_heading(heading, level=1)
+            add_paragraphs(doc, sections.get(heading, []))
+            used.add(heading)
+
+    for heading, lines in sections.items():
+        if heading not in used:
+            doc.add_heading(heading, level=1)
+            add_paragraphs(doc, lines)
 
     if include_original:
         original_text = transcription.get("text", "") or ""
@@ -470,9 +617,9 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
         source_is_portuguese=source_is_portuguese,
     )
 
-    include_original = False
+    include_original = INCLUDE_ORIGINAL_FOR_NON_PT and not source_is_portuguese
 
-    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_hook_body_cta.docx"
+    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_v16_copy.docx"
     output_path = workdir / output_name
     create_docx(original_name, transcription, structured_text, output_path, include_original=include_original)
     return output_path
