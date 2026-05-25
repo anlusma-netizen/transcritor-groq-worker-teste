@@ -1,36 +1,37 @@
-# Worker de Teste - v19 Cópia Crua + Tradução
+# Worker de Teste - v20 Tradução para Análise PT-BR
 
-Versão 19.0.0.
+Versão 20.0.0.
 
 Objetivo:
-- Não separar em Hook, Body, CTA, Promessa, Oferta etc.
-- Apenas transcrever/traduzir e diagramar em parágrafos legíveis.
-- Português continua rápido.
-- Inglês/outros idiomas são traduzidos/adaptados para PT-BR e a transcrição original vai ao final.
+- Cópia crua, sem Hook/Body/CTA.
+- Parágrafos maiores e mais enxutos.
+- Tradução adaptada para análise de copy em português brasileiro.
+- Preserva intenção, promessa, agressividade, ordem das ideias, dados, nomes e termos sensíveis.
+- Mantém transcrição original no final quando o áudio não for português.
 
-## Saída
+## Saída em português
 
 ```txt
 CÓPIA DIAGRAMADA
 ```
 
-ou, se o áudio não for português:
+## Saída em inglês/outros idiomas
 
 ```txt
-CÓPIA TRADUZIDA E DIAGRAMADA EM PT-BR
+CÓPIA TRADUZIDA PARA ANÁLISE EM PT-BR
 TRANSCRIÇÃO ORIGINAL
 ```
 
-## Variáveis novas
+## Variáveis recomendadas
 
 ```txt
 RAW_TRANSLATION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 TRANSLATE_NON_PT=true
-PARAGRAPH_SENTENCES=2
-PARAGRAPH_MAX_CHARS=650
+PARAGRAPH_SENTENCES=5
+PARAGRAPH_MAX_CHARS=1400
 ```
 
-Modelos para testar em `RAW_TRANSLATION_MODEL`:
+## Modelos para testar em RAW_TRANSLATION_MODEL
 
 ```txt
 meta-llama/llama-4-scout-17b-16e-instruct
@@ -45,8 +46,8 @@ Precisa mostrar:
 
 ```json
 {
-  "version": "19.0.0",
+  "version": "20.0.0",
   "raw_copy_mode": true,
-  "raw_translation_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  "translation_style": "ptbr_copy_analysis"
 }
 ```

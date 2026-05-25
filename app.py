@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "19.0.0"
+VERSION = "20.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -31,8 +31,8 @@ GROQ_TRANSCRIPTION_MODEL = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-
 GROQ_TRANSLATION_MODEL = os.getenv("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
 RAW_TRANSLATION_MODEL = os.getenv("RAW_TRANSLATION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 TRANSLATE_NON_PT = os.getenv("TRANSLATE_NON_PT", "true").lower() in {"1", "true", "yes", "sim"}
-PARAGRAPH_SENTENCES = int(os.getenv("PARAGRAPH_SENTENCES", "2"))
-PARAGRAPH_MAX_CHARS = int(os.getenv("PARAGRAPH_MAX_CHARS", "650"))
+PARAGRAPH_SENTENCES = int(os.getenv("PARAGRAPH_SENTENCES", "5"))
+PARAGRAPH_MAX_CHARS = int(os.getenv("PARAGRAPH_MAX_CHARS", "1400"))
 MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "24"))
 TARGET_AUDIO_BITRATE = os.getenv("TARGET_AUDIO_BITRATE", "24k")
 TARGET_AUDIO_FORMAT = os.getenv("TARGET_AUDIO_FORMAT", "mp3")
@@ -67,6 +67,7 @@ def root():
         "copy_structure": "raw_paragraphs",
         "fast_mode": true,
         "raw_copy_mode": true,
+        "translation_style": "ptbr_copy_analysis",
         "translate_non_pt": TRANSLATE_NON_PT,
         "raw_translation_model": RAW_TRANSLATION_MODEL,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
@@ -88,6 +89,7 @@ def health():
         "copy_structure": "raw_paragraphs",
         "fast_mode": true,
         "raw_copy_mode": true,
+        "translation_style": "ptbr_copy_analysis",
         "translate_non_pt": TRANSLATE_NON_PT,
         "raw_translation_model": RAW_TRANSLATION_MODEL,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
@@ -380,9 +382,10 @@ def run_translation_with_retry(prompt: str, index: int, total: int, model: str) 
                     {
                         "role": "system",
                         "content": (
-                            "Você é um tradutor profissional para copywriters brasileiros. "
-                            "Traduza fielmente, sem censurar, suavizar, resumir ou omitir termos da transcrição. "
-                            "Não faça análise de copy. Não crie estrutura. Apenas traduza com naturalidade."
+                            "Você é um tradutor/adaptador profissional para copywriters brasileiros. "
+                            "Sua tarefa é transformar uma copy em inglês em uma versão em português brasileiro natural, "
+                            "boa para análise interna de copy, preservando intenção, agressividade, dados, promessas e ordem das ideias. "
+                            "Não censure, não suavize, não resuma, não moralize e não omita termos sensíveis."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -428,18 +431,26 @@ def translate_raw_copy_to_ptbr(text: str) -> str:
 
     for i, part in enumerate(parts, start=1):
         prompt = f"""
-Traduza/adapte a transcrição abaixo para português brasileiro natural.
+Traduza/adapte a transcrição abaixo para português brasileiro natural, como material de análise interna para um copywriter brasileiro.
+
+Objetivo:
+- A tradução deve soar como uma copy entendível para brasileiros, não como tradução literal.
+- Preserve a intenção da copy original, a agressividade, o exagero, o tom provocativo, a promessa, a ordem das ideias e os dados.
+- A versão em português deve ajudar o copywriter a entender o mecanismo persuasivo da copy.
 
 Regras obrigatórias:
 - Não resuma.
 - Não analise.
 - Não adicione títulos.
 - Não separe em Hook, Body, CTA, promessa ou oferta.
-- Não omita, censure, suavize ou troque palavras sensíveis; traduza o sentido real da fala.
-- Preserve gírias, palavrões, termos de marketing, promessas, objeções, nomes, números, marcas e ordem das ideias.
-- Use português brasileiro claro e natural, sem tradução robótica.
-- Mantenha termos como hook, CTA, VSL, lead, offer, pitch, upsell, funnel e checkout em inglês quando isso soar mais natural para copywriter brasileiro.
-- Entregue apenas a tradução corrida.
+- Não censure, não suavize, não moralize e não omita palavras sensíveis, palavrões, termos sexuais ou promessas agressivas.
+- Não traduza literalmente expressões que fiquem estranhas em português brasileiro.
+- Adapte expressões idiomáticas para equivalentes naturais no Brasil.
+- Preserve nomes, marcas, números, provas, promessas e sequência das ideias.
+- Quando houver medidas em polegadas, mantenha a referência original e acrescente a equivalência aproximada em centímetros quando ficar natural. Exemplo: 9 inches → 9 polegadas, cerca de 22 cm.
+- Mantenha termos de marketing em inglês quando forem comuns para copywriter brasileiro: hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout.
+- Evite frases robóticas como “o tamanho vai disparar”, “atores de ponta”, “ela vai agradecer por assistir”. Prefira português brasileiro natural e direto.
+- Entregue apenas a tradução corrida em parágrafos.
 
 Transcrição original:
 {part}
@@ -466,7 +477,7 @@ def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
         label = "CÓPIA DIAGRAMADA"
     else:
         working_text = translate_raw_copy_to_ptbr(base_text)
-        label = "CÓPIA TRADUZIDA E DIAGRAMADA EM PT-BR"
+        label = "CÓPIA TRADUZIDA PARA ANÁLISE EM PT-BR"
 
     paragraphs = paragraphize_raw_copy(working_text)
 
@@ -567,7 +578,7 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
     if source_is_pt:
         title.add_run("Cópia Crua Diagramada")
     else:
-        title.add_run("Cópia Traduzida PT-BR")
+        title.add_run("Cópia Traduzida para Análise PT-BR")
 
     meta = doc.add_paragraph(style="Normal")
     meta.add_run("Arquivo: ").bold = True
@@ -579,7 +590,7 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
 
     meta3 = doc.add_paragraph(style="Normal")
     meta3.add_run("Formato: ").bold = True
-    meta3.add_run("cópia crua em parágrafos, sem análise de Hook/Body/CTA")
+    meta3.add_run("cópia crua em parágrafos; tradução adaptada para análise, sem Hook/Body/CTA")
 
     doc.add_paragraph("")
 
@@ -614,7 +625,7 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
 
     include_original = INCLUDE_ORIGINAL_FOR_NON_PT and not source_is_portuguese
 
-    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_copia_crua.docx"
+    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_copia_analise_ptbr.docx"
     output_path = workdir / output_name
     create_docx(original_name, transcription, structured_text, output_path, include_original=include_original)
     return output_path
