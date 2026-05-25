@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "16.0.0"
+VERSION = "17.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -29,6 +29,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GROQ_TRANSCRIPTION_MODEL = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
 GROQ_TRANSLATION_MODEL = os.getenv("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+FAST_TRANSLATION_MODEL = os.getenv("FAST_TRANSLATION_MODEL", "llama-3.1-8b-instant")
 MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "24"))
 TARGET_AUDIO_BITRATE = os.getenv("TARGET_AUDIO_BITRATE", "24k")
 TARGET_AUDIO_FORMAT = os.getenv("TARGET_AUDIO_FORMAT", "mp3")
@@ -64,6 +65,8 @@ def root():
         "fast_mode": true,
         "vsl_mode": true,
         "translation_for_non_pt": true,
+        "fast_translation": true,
+        "fast_translation_model": FAST_TRANSLATION_MODEL,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -84,6 +87,8 @@ def health():
         "fast_mode": true,
         "vsl_mode": true,
         "translation_for_non_pt": true,
+        "fast_translation": true,
+        "fast_translation_model": FAST_TRANSLATION_MODEL,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -267,20 +272,21 @@ def split_text_for_llm(text: str, max_chars: int) -> List[str]:
     return [p for p in parts if p]
 
 
-def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
+def run_llm_with_retry(prompt: str, index: int, total: int, model: Optional[str] = None, max_attempts: int = 3) -> str:
     if not client:
         raise RuntimeError("GROQ_API_KEY não configurada no Railway.")
 
     last_error = None
+    selected_model = model or GROQ_TRANSLATION_MODEL
 
-    for attempt in range(1, 6):
+    for attempt in range(1, max_attempts + 1):
         try:
             completion = client.chat.completions.create(
-                model=GROQ_TRANSLATION_MODEL,
+                model=selected_model,
                 messages=[
                     {
                         "role": "system",
-                        "content": "Você organiza transcrições de anúncios, VSLs e cartas de vendas com fidelidade, sem reescrever criativamente.",
+                        "content": "Você traduz e organiza transcrições para copywriters brasileiros com fidelidade, clareza e rapidez.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -298,79 +304,21 @@ def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
                 or "tokens per minute" in error_text
                 or "TPM" in error_text
                 or "Rate limit" in error_text
+                or "429" in error_text
             ):
-                print(f"Rate limit no bloco {index}/{total}. Tentativa {attempt}/5. Esperando {TRANSLATION_RETRY_WAIT_SECONDS}s.")
-                time.sleep(TRANSLATION_RETRY_WAIT_SECONDS)
+                wait_time = min(25, max(5, TRANSLATION_RETRY_WAIT_SECONDS // 3))
+                print(f"Rate limit no bloco {index}/{total}. Tentativa {attempt}/{max_attempts}. Esperando {wait_time}s.")
+                time.sleep(wait_time)
                 continue
+
+            # fallback: se o modelo rápido falhar por indisponibilidade, tenta o modelo principal uma vez
+            if selected_model == FAST_TRANSLATION_MODEL and GROQ_TRANSLATION_MODEL != FAST_TRANSLATION_MODEL:
+                print(f"Modelo rápido falhou ({FAST_TRANSLATION_MODEL}). Tentando fallback: {GROQ_TRANSLATION_MODEL}")
+                return run_llm_with_retry(prompt, index, total, model=GROQ_TRANSLATION_MODEL, max_attempts=1)
 
             raise
 
-    raise RuntimeError(f"Falha ao processar bloco {index}/{total}: {last_error}")
-
-
-
-
-def looks_like_long_vsl(text: str) -> bool:
-    words = re.findall(r"\w+", text or "", flags=re.UNICODE)
-    # VSL normalmente passa disso; criativo curto fica abaixo.
-    return len(words) >= 260
-
-
-def clean_transcript_text(text: str) -> str:
-    text = (text or "").strip()
-    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def split_sentences(text: str) -> List[str]:
-    text = clean_transcript_text(text)
-    if not text:
-        return []
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-def join_sentences(items: List[str]) -> str:
-    return " ".join([x.strip() for x in items if x.strip()]).strip() or "[não identificado neste trecho]"
-
-
-def translate_to_ptbr_natural(text: str) -> str:
-    """
-    Tradução/adaptação natural para PT-BR.
-    Usa LLM somente quando o áudio não é português.
-    """
-    text = clean_transcript_text(text)
-    if not text:
-        return ""
-
-    parts = split_text_for_llm(text, TRANSLATION_CHUNK_CHARS)
-    translated_parts = []
-
-    for i, part in enumerate(parts, start=1):
-        prompt = f"""
-Traduza/adapte o trecho {i}/{len(parts)} abaixo para português brasileiro natural.
-
-Regras:
-- Não resuma.
-- Não invente.
-- Não melhore a copy.
-- Preserve o sentido, promessas, objeções, provas, CTA e ordem das ideias.
-- Não faça tradução literal robótica.
-- Use português brasileiro claro, natural e útil para um copywriter entender.
-- Mantenha termos de marketing em inglês quando forem comuns no Brasil, como hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout, criativo, se fizer sentido.
-- Se houver nomes de produto, marca, pessoa, método ou valores, preserve.
-- Entregue apenas o texto traduzido/adaptado.
-
-Texto original:
-{part}
-""".strip()
-        translated_parts.append(run_llm_with_retry(prompt, i, len(parts)))
-
-        if i < len(parts):
-            time.sleep(TRANSLATION_DELAY_SECONDS)
-
-    return "\n\n".join(translated_parts).strip()
+    raise RuntimeError(f"Falha ao processar bloco {index}/{total} com {selected_model}: {last_error}")
 
 
 def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:

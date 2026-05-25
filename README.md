@@ -1,12 +1,26 @@
-# Worker de Teste - v16 VSL + Tradução PT-BR
+# Worker de Teste - v17 Tradução Rápida
 
-Versão 16.0.0.
+Versão 17.0.0.
 
-Objetivo:
-- Criativos curtos continuam rápidos.
-- VSL/copy longa sai em formato de mapa de copy.
-- Áudios em inglês/outros idiomas geram versão traduzida/adaptada em PT-BR.
-- A transcrição original entra no final quando o áudio não for português.
+Correção principal:
+- Português continua rápido.
+- Inglês/outros idiomas usam modelo rápido para tradução/adaptação PT-BR.
+- Remove delay fixo entre blocos de tradução.
+- Se o modelo rápido falhar, tenta fallback no modelo principal.
+
+## Variável nova
+
+```txt
+FAST_TRANSLATION_MODEL=llama-3.1-8b-instant
+```
+
+Mantenha:
+
+```txt
+GROQ_TRANSLATION_MODEL=llama-3.3-70b-versatile
+```
+
+Assim o rápido traduz primeiro, e o 70B fica como reserva.
 
 ## Saída para criativos curtos
 
@@ -33,24 +47,12 @@ TRANSCRIÇÃO LIMPA COMPLETA
 
 ## Health
 
-Abra:
-
-```txt
-/health
-```
-
 Precisa mostrar:
 
 ```json
 {
-  "version": "16.0.0",
-  "output_format": "docx",
-  "vsl_mode": true,
-  "translation_for_non_pt": true
+  "version": "17.0.0",
+  "fast_translation": true,
+  "fast_translation_model": "llama-3.1-8b-instant"
 }
 ```
-
-## Observação
-
-Português é processado rápido, sem etapa extra de tradução.
-Áudio em inglês/outro idioma usa IA de texto para traduzir/adaptar, então demora mais.
