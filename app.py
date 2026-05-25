@@ -5,7 +5,6 @@ import shutil
 import tempfile
 import time
 import subprocess
-import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse, parse_qs
@@ -22,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "14.0.0"
+VERSION = "15.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -37,8 +36,6 @@ TRANSLATION_CHUNK_CHARS = int(os.getenv("TRANSLATION_CHUNK_CHARS", "3000"))
 TRANSLATION_DELAY_SECONDS = int(os.getenv("TRANSLATION_DELAY_SECONDS", "12"))
 TRANSLATION_RETRY_WAIT_SECONDS = int(os.getenv("TRANSLATION_RETRY_WAIT_SECONDS", "70"))
 INCLUDE_ORIGINAL_FOR_NON_PT = os.getenv("INCLUDE_ORIGINAL_FOR_NON_PT", "true").lower() in {"1", "true", "yes", "sim"}
-MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
-JOB_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -63,9 +60,8 @@ def root():
         "service": "transcritor-groq-worker-teste",
         "version": VERSION,
         "output_format": "docx",
-        "copy_structure": "hook_body_cta",
-        "queue_control": true,
-        "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
+        "copy_structure": "hook_body_cta_fast",
+        "fast_mode": true,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -82,9 +78,8 @@ def health():
         "translation_chunk_chars": TRANSLATION_CHUNK_CHARS,
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
         "output_format": "docx",
-        "copy_structure": "hook_body_cta",
-        "queue_control": true,
-        "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
+        "copy_structure": "hook_body_cta_fast",
+        "fast_mode": true,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -309,74 +304,51 @@ def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
     raise RuntimeError(f"Falha ao processar bloco {index}/{total}: {last_error}")
 
 
+
 def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
-    if not text.strip():
-        return ""
+    """
+    Modo rápido: não usa LLM depois da transcrição.
+    Para ganhar velocidade, só limpa timestamps simples e divide o texto em HOOK/BODY/CTA por posição.
+    Não traduz. Para idioma estrangeiro, retorna a transcrição original estruturada rapidamente.
+    """
+    text = (text or "").strip()
+    if not text:
+        return "HOOK:\n[não identificado]\n\nBODY:\n[não identificado]\n\nCTA:\n[não identificado]"
 
-    parts = split_text_for_llm(text, TRANSLATION_CHUNK_CHARS)
-    final_parts = []
+    # Remove timestamps comuns se aparecerem: [00:01], 00:01, 00:01:20
+    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
 
-    for i, part in enumerate(parts, start=1):
-        if source_is_portuguese:
-            prompt = f"""
-Organize o bloco {i}/{len(parts)} abaixo em português brasileiro para virar um DOCX editável de estudo de copy/VSL/anúncio.
+    # Quebra em frases, preservando a ordem.
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences = [s.strip() for s in sentences if s.strip()]
 
-Regras obrigatórias:
-- O texto já está em português. Não traduza.
-- Não resuma.
-- Não melhore a copy.
-- Não adicione argumentos.
-- Não invente nada.
-- Preserve o máximo possível as palavras originais.
-- Remova apenas timestamps, se aparecerem.
-- Não use negrito.
-- Não use markdown.
-- Apenas separe o conteúdo nestas 3 seções:
-  HOOK:
-  BODY:
-  CTA:
-- Se não houver CTA claro neste bloco, escreva:
-  CTA:
-  [não identificado neste trecho]
-- Entregue apenas o texto estruturado.
+    if not sentences:
+        sentences = [text]
 
-Texto:
-{part}
-""".strip()
-        else:
-            prompt = f"""
-Traduza o bloco {i}/{len(parts)} abaixo para português brasileiro e organize para virar um DOCX editável de estudo de copy/VSL/anúncio.
+    n = len(sentences)
 
-Regras obrigatórias:
-- Traduza com máxima fidelidade.
-- Não resuma.
-- Não melhore a copy.
-- Não adicione argumentos.
-- Não invente nada.
-- Preserve repetições, promessas, ganchos, CTAs e estrutura do anúncio.
-- Remova apenas timestamps, se aparecerem.
-- Não use negrito.
-- Não use markdown.
-- Apenas separe o conteúdo nestas 3 seções:
-  HOOK:
-  BODY:
-  CTA:
-- Se não houver CTA claro neste bloco, escreva:
-  CTA:
-  [não identificado neste trecho]
-- Entregue apenas o texto traduzido e estruturado.
+    if n <= 3:
+        hook = sentences[:1]
+        body = sentences[1:2] if n >= 2 else []
+        cta = sentences[2:] if n >= 3 else []
+    else:
+        hook_end = max(1, round(n * 0.18))
+        cta_start = max(hook_end + 1, round(n * 0.82))
+        hook = sentences[:hook_end]
+        body = sentences[hook_end:cta_start]
+        cta = sentences[cta_start:]
 
-Texto:
-{part}
-""".strip()
+    if not body:
+        body = ["[não identificado neste trecho]"]
+    if not cta:
+        cta = ["[não identificado neste trecho]"]
 
-        print(f"Organizando bloco {i}/{len(parts)} em Hook/Body/CTA...")
-        final_parts.append(run_llm_with_retry(prompt, i, len(parts)))
-
-        if i < len(parts):
-            time.sleep(TRANSLATION_DELAY_SECONDS)
-
-    return "\n\n".join(final_parts).strip()
+    return (
+        "HOOK:\n" + " ".join(hook).strip() +
+        "\n\nBODY:\n" + " ".join(body).strip() +
+        "\n\nCTA:\n" + " ".join(cta).strip()
+    )
 
 
 def parse_hook_body_cta(structured_text: str) -> Dict[str, List[str]]:
@@ -454,7 +426,7 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
 
     title = doc.add_paragraph(style="Title")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title.add_run("Transcrição PT-BR - Estrutura da Copy")
+    title.add_run("Transcrição - Estrutura Rápida da Copy")
 
     meta = doc.add_paragraph(style="Normal")
     meta.add_run("Arquivo: ").bold = True
@@ -498,7 +470,7 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
         source_is_portuguese=source_is_portuguese,
     )
 
-    include_original = INCLUDE_ORIGINAL_FOR_NON_PT and not source_is_portuguese
+    include_original = False
 
     output_name = safe_filename(Path(original_name).stem or "transcricao") + "_hook_body_cta.docx"
     output_path = workdir / output_name
@@ -539,32 +511,28 @@ async def process_telegram_media(request: Request, file: Optional[UploadFile] = 
 
 
 @app.post("/process-source")
-def process_source(payload: Dict[str, Any]):
-    print("Aguardando vaga na fila de processamento...")
-    with JOB_SEMAPHORE:
-        print("Iniciando processamento na fila controlada.")
-        source_type = payload.get("sourceType")
-        original_name = payload.get("fileName") or "arquivo"
+async def process_source(payload: Dict[str, Any]):
+    source_type = payload.get("sourceType")
+    original_name = payload.get("fileName") or "arquivo"
 
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
-            input_path = workdir / safe_filename(original_name, "input.bin")
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        input_path = workdir / safe_filename(original_name, "input.bin")
 
-            if source_type == "url":
-                url = payload.get("url")
-                if not url:
-                    raise HTTPException(status_code=400, detail="URL não enviada.")
-                download_google_drive_or_url(url, input_path)
+        if source_type == "url":
+            url = payload.get("url")
+            if not url:
+                raise HTTPException(status_code=400, detail="URL não enviada.")
+            download_google_drive_or_url(url, input_path)
 
-            elif source_type == "telegram_file_id":
-                file_id = payload.get("fileId")
-                if not file_id:
-                    raise HTTPException(status_code=400, detail="fileId do Telegram não enviado.")
-                download_telegram_file(file_id, input_path)
+        elif source_type == "telegram_file_id":
+            file_id = payload.get("fileId")
+            if not file_id:
+                raise HTTPException(status_code=400, detail="fileId do Telegram não enviado.")
+            download_telegram_file(file_id, input_path)
 
-            else:
-                raise HTTPException(status_code=400, detail="Envie arquivo ou link público.")
+        else:
+            raise HTTPException(status_code=400, detail="Envie arquivo ou link público.")
 
-            output_path = process_file(input_path, original_name, workdir)
-            print("Processamento finalizado.")
-            return persistent_file_response(output_path)
+        output_path = process_file(input_path, original_name, workdir)
+        return persistent_file_response(output_path)
