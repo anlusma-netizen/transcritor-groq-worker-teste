@@ -1,10 +1,11 @@
 # Worker de Teste - Telegram → Groq → DOCX
 
-Versão 13.0.0.
+Versão 14.0.0.
 
 Correção principal:
-- melhora processamento de múltiplos vídeos enviados ao mesmo tempo.
-- rota `/process-source` agora roda em thread separada no FastAPI, evitando travar todas as requisições quando uma conversão/transcrição está em andamento.
+- fila controlada para múltiplos vídeos enviados ao mesmo tempo.
+- por padrão processa 1 arquivo por vez (`MAX_CONCURRENT_JOBS=1`).
+- evita travar o Railway e evita várias chamadas simultâneas na Groq.
 
 Gera DOCX editável para abrir no Google Docs.
 
@@ -20,6 +21,14 @@ Sem negrito automático.
 Sem timestamps.
 Sem duplicar transcrição original em áudio português.
 
+## Variável nova opcional
+
+```txt
+MAX_CONCURRENT_JOBS=1
+```
+
+Recomendado deixar 1. Depois podemos testar 2.
+
 ## Health
 
 Abra:
@@ -31,5 +40,5 @@ Abra:
 Precisa mostrar:
 
 ```json
-{"version": "13.0.0", "output_format": "docx", "concurrency_fix": true}
+{"version": "14.0.0", "output_format": "docx", "queue_control": true}
 ```

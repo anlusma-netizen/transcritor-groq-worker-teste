@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse, parse_qs
@@ -21,7 +22,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "13.0.0"
+VERSION = "14.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -36,6 +37,8 @@ TRANSLATION_CHUNK_CHARS = int(os.getenv("TRANSLATION_CHUNK_CHARS", "3000"))
 TRANSLATION_DELAY_SECONDS = int(os.getenv("TRANSLATION_DELAY_SECONDS", "12"))
 TRANSLATION_RETRY_WAIT_SECONDS = int(os.getenv("TRANSLATION_RETRY_WAIT_SECONDS", "70"))
 INCLUDE_ORIGINAL_FOR_NON_PT = os.getenv("INCLUDE_ORIGINAL_FOR_NON_PT", "true").lower() in {"1", "true", "yes", "sim"}
+MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
+JOB_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -61,7 +64,8 @@ def root():
         "version": VERSION,
         "output_format": "docx",
         "copy_structure": "hook_body_cta",
-        "concurrency_fix": true,
+        "queue_control": true,
+        "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -79,7 +83,8 @@ def health():
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
         "output_format": "docx",
         "copy_structure": "hook_body_cta",
-        "concurrency_fix": true,
+        "queue_control": true,
+        "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -535,27 +540,31 @@ async def process_telegram_media(request: Request, file: Optional[UploadFile] = 
 
 @app.post("/process-source")
 def process_source(payload: Dict[str, Any]):
-    source_type = payload.get("sourceType")
-    original_name = payload.get("fileName") or "arquivo"
+    print("Aguardando vaga na fila de processamento...")
+    with JOB_SEMAPHORE:
+        print("Iniciando processamento na fila controlada.")
+        source_type = payload.get("sourceType")
+        original_name = payload.get("fileName") or "arquivo"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        workdir = Path(tmp)
-        input_path = workdir / safe_filename(original_name, "input.bin")
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            input_path = workdir / safe_filename(original_name, "input.bin")
 
-        if source_type == "url":
-            url = payload.get("url")
-            if not url:
-                raise HTTPException(status_code=400, detail="URL não enviada.")
-            download_google_drive_or_url(url, input_path)
+            if source_type == "url":
+                url = payload.get("url")
+                if not url:
+                    raise HTTPException(status_code=400, detail="URL não enviada.")
+                download_google_drive_or_url(url, input_path)
 
-        elif source_type == "telegram_file_id":
-            file_id = payload.get("fileId")
-            if not file_id:
-                raise HTTPException(status_code=400, detail="fileId do Telegram não enviado.")
-            download_telegram_file(file_id, input_path)
+            elif source_type == "telegram_file_id":
+                file_id = payload.get("fileId")
+                if not file_id:
+                    raise HTTPException(status_code=400, detail="fileId do Telegram não enviado.")
+                download_telegram_file(file_id, input_path)
 
-        else:
-            raise HTTPException(status_code=400, detail="Envie arquivo ou link público.")
+            else:
+                raise HTTPException(status_code=400, detail="Envie arquivo ou link público.")
 
-        output_path = process_file(input_path, original_name, workdir)
-        return persistent_file_response(output_path)
+            output_path = process_file(input_path, original_name, workdir)
+            print("Processamento finalizado.")
+            return persistent_file_response(output_path)
