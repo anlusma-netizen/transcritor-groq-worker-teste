@@ -1,45 +1,42 @@
-# Worker de Teste - v18 Tradução Rápida Corrigida
+# Worker de Teste - v19 Cópia Crua + Tradução
 
-Versão 18.0.0.
+Versão 19.0.0.
 
-Correção:
-- Corrige erro `clean_transcript_text is not defined` da v17.
-- Mantém tradução/adaptação rápida para áudio em inglês/outros idiomas.
+Objetivo:
+- Não separar em Hook, Body, CTA, Promessa, Oferta etc.
+- Apenas transcrever/traduzir e diagramar em parágrafos legíveis.
 - Português continua rápido.
+- Inglês/outros idiomas são traduzidos/adaptados para PT-BR e a transcrição original vai ao final.
 
-## Variável nova
+## Saída
 
 ```txt
-FAST_TRANSLATION_MODEL=llama-3.1-8b-instant
+CÓPIA DIAGRAMADA
 ```
 
-Mantenha:
+ou, se o áudio não for português:
 
 ```txt
-GROQ_TRANSLATION_MODEL=llama-3.3-70b-versatile
+CÓPIA TRADUZIDA E DIAGRAMADA EM PT-BR
+TRANSCRIÇÃO ORIGINAL
 ```
 
-## Saída para criativos curtos
+## Variáveis novas
 
 ```txt
-HOOK
-BODY
-CTA
-TRANSCRIÇÃO LIMPA COMPLETA
+RAW_TRANSLATION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+TRANSLATE_NON_PT=true
+PARAGRAPH_SENTENCES=2
+PARAGRAPH_MAX_CHARS=650
 ```
 
-## Saída para VSL / copy longa
+Modelos para testar em `RAW_TRANSLATION_MODEL`:
 
 ```txt
-ABERTURA / HOOK
-PROBLEMA / DOR
-PROMESSA / TRANSFORMAÇÃO
-MECANISMO / SOLUÇÃO
-PROVAS / AUTORIDADE
-OFERTA / BENEFÍCIO CENTRAL
-OBJEÇÕES / GARANTIA / RISCO
-CTA / FECHAMENTO
-TRANSCRIÇÃO LIMPA COMPLETA
+meta-llama/llama-4-scout-17b-16e-instruct
+llama-3.3-70b-versatile
+openai/gpt-oss-20b
+openai/gpt-oss-120b
 ```
 
 ## Health
@@ -48,8 +45,8 @@ Precisa mostrar:
 
 ```json
 {
-  "version": "18.0.0",
-  "fast_translation": true,
-  "fast_translation_model": "llama-3.1-8b-instant"
+  "version": "19.0.0",
+  "raw_copy_mode": true,
+  "raw_translation_model": "meta-llama/llama-4-scout-17b-16e-instruct"
 }
 ```

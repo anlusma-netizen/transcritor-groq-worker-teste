@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "18.0.0"
+VERSION = "19.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -29,7 +29,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GROQ_TRANSCRIPTION_MODEL = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
 GROQ_TRANSLATION_MODEL = os.getenv("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
-FAST_TRANSLATION_MODEL = os.getenv("FAST_TRANSLATION_MODEL", "llama-3.1-8b-instant")
+RAW_TRANSLATION_MODEL = os.getenv("RAW_TRANSLATION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+TRANSLATE_NON_PT = os.getenv("TRANSLATE_NON_PT", "true").lower() in {"1", "true", "yes", "sim"}
+PARAGRAPH_SENTENCES = int(os.getenv("PARAGRAPH_SENTENCES", "2"))
+PARAGRAPH_MAX_CHARS = int(os.getenv("PARAGRAPH_MAX_CHARS", "650"))
 MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "24"))
 TARGET_AUDIO_BITRATE = os.getenv("TARGET_AUDIO_BITRATE", "24k")
 TARGET_AUDIO_FORMAT = os.getenv("TARGET_AUDIO_FORMAT", "mp3")
@@ -61,12 +64,11 @@ def root():
         "service": "transcritor-groq-worker-teste",
         "version": VERSION,
         "output_format": "docx",
-        "copy_structure": "creative_fast_or_vsl_map",
+        "copy_structure": "raw_paragraphs",
         "fast_mode": true,
-        "vsl_mode": true,
-        "translation_for_non_pt": true,
-        "fast_translation": true,
-        "fast_translation_model": FAST_TRANSLATION_MODEL,
+        "raw_copy_mode": true,
+        "translate_non_pt": TRANSLATE_NON_PT,
+        "raw_translation_model": RAW_TRANSLATION_MODEL,
         "routes": ["/health", "/process-source", "/process-telegram-media"],
     }
 
@@ -83,12 +85,11 @@ def health():
         "translation_chunk_chars": TRANSLATION_CHUNK_CHARS,
         "translation_delay_seconds": TRANSLATION_DELAY_SECONDS,
         "output_format": "docx",
-        "copy_structure": "creative_fast_or_vsl_map",
+        "copy_structure": "raw_paragraphs",
         "fast_mode": true,
-        "vsl_mode": true,
-        "translation_for_non_pt": true,
-        "fast_translation": true,
-        "fast_translation_model": FAST_TRANSLATION_MODEL,
+        "raw_copy_mode": true,
+        "translate_non_pt": TRANSLATE_NON_PT,
+        "raw_translation_model": RAW_TRANSLATION_MODEL,
         "include_original_for_non_pt": INCLUDE_ORIGINAL_FOR_NON_PT,
     }
 
@@ -272,21 +273,117 @@ def split_text_for_llm(text: str, max_chars: int) -> List[str]:
     return [p for p in parts if p]
 
 
-def run_llm_with_retry(prompt: str, index: int, total: int, model: Optional[str] = None, max_attempts: int = 3) -> str:
+def run_llm_with_retry(prompt: str, index: int, total: int) -> str:
     if not client:
         raise RuntimeError("GROQ_API_KEY não configurada no Railway.")
 
     last_error = None
-    selected_model = model or GROQ_TRANSLATION_MODEL
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, 6):
         try:
             completion = client.chat.completions.create(
-                model=selected_model,
+                model=GROQ_TRANSLATION_MODEL,
                 messages=[
                     {
                         "role": "system",
-                        "content": "Você traduz e organiza transcrições para copywriters brasileiros com fidelidade, clareza e rapidez.",
+                        "content": "Você organiza transcrições de anúncios, VSLs e cartas de vendas com fidelidade, sem reescrever criativamente.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+            )
+            return completion.choices[0].message.content.strip()
+
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc)
+
+            if (
+                "rate_limit_exceeded" in error_text
+                or "Request too large" in error_text
+                or "tokens per minute" in error_text
+                or "TPM" in error_text
+                or "Rate limit" in error_text
+            ):
+                print(f"Rate limit no bloco {index}/{total}. Tentativa {attempt}/5. Esperando {TRANSLATION_RETRY_WAIT_SECONDS}s.")
+                time.sleep(TRANSLATION_RETRY_WAIT_SECONDS)
+                continue
+
+            raise
+
+    raise RuntimeError(f"Falha ao processar bloco {index}/{total}: {last_error}")
+
+
+
+
+def clean_transcript_text(text: str) -> str:
+    text = (text or "").strip()
+    # Remove timestamps comuns se aparecerem: [00:01], 00:01, 00:01:20
+    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def split_sentences(text: str) -> List[str]:
+    text = clean_transcript_text(text)
+    if not text:
+        return []
+    # Divide em frases, mas sem inventar estrutura de copy.
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def paragraphize_raw_copy(text: str, sentences_per_paragraph: Optional[int] = None, max_chars: Optional[int] = None) -> List[str]:
+    """
+    Só diagrama a cópia em parágrafos legíveis.
+    Não cria Hook/Body/CTA.
+    Não resume.
+    Não interpreta.
+    """
+    sentences_per_paragraph = sentences_per_paragraph or PARAGRAPH_SENTENCES
+    max_chars = max_chars or PARAGRAPH_MAX_CHARS
+
+    sentences = split_sentences(text)
+    if not sentences:
+        cleaned = clean_transcript_text(text)
+        return [cleaned] if cleaned else ["[transcrição vazia]"]
+
+    paragraphs = []
+    current = []
+
+    for sentence in sentences:
+        candidate = " ".join(current + [sentence]).strip()
+
+        if current and (len(current) >= sentences_per_paragraph or len(candidate) > max_chars):
+            paragraphs.append(" ".join(current).strip())
+            current = [sentence]
+        else:
+            current.append(sentence)
+
+    if current:
+        paragraphs.append(" ".join(current).strip())
+
+    return [p for p in paragraphs if p.strip()]
+
+
+def run_translation_with_retry(prompt: str, index: int, total: int, model: str) -> str:
+    if not client:
+        raise RuntimeError("GROQ_API_KEY não configurada no Railway.")
+
+    last_error = None
+
+    for attempt in range(1, 4):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Você é um tradutor profissional para copywriters brasileiros. "
+                            "Traduza fielmente, sem censurar, suavizar, resumir ou omitir termos da transcrição. "
+                            "Não faça análise de copy. Não crie estrutura. Apenas traduza com naturalidade."
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -307,177 +404,106 @@ def run_llm_with_retry(prompt: str, index: int, total: int, model: Optional[str]
                 or "429" in error_text
             ):
                 wait_time = min(25, max(5, TRANSLATION_RETRY_WAIT_SECONDS // 3))
-                print(f"Rate limit no bloco {index}/{total}. Tentativa {attempt}/{max_attempts}. Esperando {wait_time}s.")
+                print(f"Rate limit na tradução {index}/{total}. Tentativa {attempt}/3. Esperando {wait_time}s.")
                 time.sleep(wait_time)
                 continue
 
-            if selected_model == FAST_TRANSLATION_MODEL and GROQ_TRANSLATION_MODEL != FAST_TRANSLATION_MODEL:
-                print(f"Modelo rápido falhou ({FAST_TRANSLATION_MODEL}). Tentando fallback: {GROQ_TRANSLATION_MODEL}")
-                return run_llm_with_retry(prompt, index, total, model=GROQ_TRANSLATION_MODEL, max_attempts=1)
+            # fallback para modelo principal, caso o modelo escolhido não exista ou falhe
+            if model != GROQ_TRANSLATION_MODEL:
+                print(f"Modelo de tradução falhou ({model}). Tentando fallback: {GROQ_TRANSLATION_MODEL}")
+                return run_translation_with_retry(prompt, index, total, GROQ_TRANSLATION_MODEL)
 
             raise
 
-    raise RuntimeError(f"Falha ao processar bloco {index}/{total} com {selected_model}: {last_error}")
-
-def looks_like_long_vsl(text: str) -> bool:
-    words = re.findall(r"\w+", text or "", flags=re.UNICODE)
-    # VSL normalmente passa disso; criativo curto fica abaixo.
-    return len(words) >= 260
+    raise RuntimeError(f"Falha ao traduzir bloco {index}/{total} com {model}: {last_error}")
 
 
-def clean_transcript_text(text: str) -> str:
-    text = (text or "").strip()
-    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def split_sentences(text: str) -> List[str]:
-    text = clean_transcript_text(text)
-    if not text:
-        return []
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-def join_sentences(items: List[str]) -> str:
-    return " ".join([x.strip() for x in items if x.strip()]).strip() or "[não identificado neste trecho]"
-
-
-def translate_to_ptbr_natural(text: str) -> str:
-    """
-    Tradução/adaptação natural para PT-BR.
-    v18 usa modelo rápido para não travar em áudios em inglês/outros idiomas.
-    """
+def translate_raw_copy_to_ptbr(text: str) -> str:
     text = clean_transcript_text(text)
     if not text:
         return ""
 
     parts = split_text_for_llm(text, TRANSLATION_CHUNK_CHARS)
-    translated_parts = []
+    translated = []
 
     for i, part in enumerate(parts, start=1):
         prompt = f"""
-Traduza/adapte para português brasileiro natural.
+Traduza/adapte a transcrição abaixo para português brasileiro natural.
 
-Regras:
-- Não resuma, não invente e não melhore a copy.
-- Preserve ordem, promessa, objeções, provas, CTA, nomes, números e marcas.
-- Não faça tradução literal robótica.
-- Mantenha termos de marketing comuns em inglês quando fizer sentido: hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout.
-- Entregue apenas o texto traduzido/adaptado.
+Regras obrigatórias:
+- Não resuma.
+- Não analise.
+- Não adicione títulos.
+- Não separe em Hook, Body, CTA, promessa ou oferta.
+- Não omita, censure, suavize ou troque palavras sensíveis; traduza o sentido real da fala.
+- Preserve gírias, palavrões, termos de marketing, promessas, objeções, nomes, números, marcas e ordem das ideias.
+- Use português brasileiro claro e natural, sem tradução robótica.
+- Mantenha termos como hook, CTA, VSL, lead, offer, pitch, upsell, funnel e checkout em inglês quando isso soar mais natural para copywriter brasileiro.
+- Entregue apenas a tradução corrida.
 
-Texto:
+Transcrição original:
 {part}
 """.strip()
-        translated_parts.append(
-            run_llm_with_retry(prompt, i, len(parts), model=FAST_TRANSLATION_MODEL, max_attempts=3)
-        )
 
-    return "\n\n".join(translated_parts).strip()
+        translated.append(run_translation_with_retry(prompt, i, len(parts), RAW_TRANSLATION_MODEL))
+
+    return "\n\n".join(translated).strip()
+
 
 def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
     """
-    v16:
-    - Português: rápido, sem LLM.
-    - Não português: traduz/adapta para PT-BR e depois estrutura.
-    - Criativo curto: HOOK/BODY/CTA.
-    - VSL longa: mapa de VSL com seções menores + transcrição completa.
+    v19: cópia crua diagramada.
+    Sem Hook/Body/CTA.
+    Sem mapa de VSL.
+    Só parágrafos.
     """
     base_text = clean_transcript_text(text)
     if not base_text:
-        return "MODE: CREATIVE\n\nHOOK:\n[não identificado]\n\nBODY:\n[não identificado]\n\nCTA:\n[não identificado]"
+        return "MODE: RAW\n\nCÓPIA DIAGRAMADA:\n[transcrição vazia]"
 
-    if source_is_portuguese:
+    if source_is_portuguese or not TRANSLATE_NON_PT:
         working_text = base_text
-        original_language_note = ""
+        label = "CÓPIA DIAGRAMADA"
     else:
-        working_text = translate_to_ptbr_natural(base_text)
-        original_language_note = "Texto abaixo traduzido/adaptado para PT-BR. A transcrição original fica no final do DOCX."
+        working_text = translate_raw_copy_to_ptbr(base_text)
+        label = "CÓPIA TRADUZIDA E DIAGRAMADA EM PT-BR"
 
-    sentences = split_sentences(working_text)
-    if not sentences:
-        sentences = [working_text]
+    paragraphs = paragraphize_raw_copy(working_text)
 
-    n = len(sentences)
-
-    if not looks_like_long_vsl(working_text):
-        if n <= 3:
-            hook = sentences[:1]
-            body = sentences[1:2] if n >= 2 else []
-            cta = sentences[2:] if n >= 3 else []
-        else:
-            hook_end = max(1, round(n * 0.18))
-            cta_start = max(hook_end + 1, round(n * 0.82))
-            hook = sentences[:hook_end]
-            body = sentences[hook_end:cta_start]
-            cta = sentences[cta_start:]
-
-        return (
-            "MODE: CREATIVE\n\n"
-            + (f"OBSERVAÇÃO:\n{original_language_note}\n\n" if original_language_note else "")
-            + "HOOK:\n" + join_sentences(hook) +
-            "\n\nBODY:\n" + join_sentences(body) +
-            "\n\nCTA:\n" + join_sentences(cta) +
-            "\n\nTRANSCRIÇÃO LIMPA COMPLETA:\n" + working_text
-        )
-
-    # Mapa VSL por blocos proporcionais.
-    # Isso evita BODY gigante.
-    ranges = [
-        ("ABERTURA / HOOK", 0.00, 0.08),
-        ("PROBLEMA / DOR", 0.08, 0.22),
-        ("PROMESSA / TRANSFORMAÇÃO", 0.22, 0.34),
-        ("MECANISMO / SOLUÇÃO", 0.34, 0.52),
-        ("PROVAS / AUTORIDADE", 0.52, 0.68),
-        ("OFERTA / BENEFÍCIO CENTRAL", 0.68, 0.82),
-        ("OBJEÇÕES / GARANTIA / RISCO", 0.82, 0.92),
-        ("CTA / FECHAMENTO", 0.92, 1.00),
-    ]
-
-    output = ["MODE: VSL"]
-    if original_language_note:
-        output += ["", "OBSERVAÇÃO:", original_language_note]
-
-    for title, start, end in ranges:
-        a = int(round(n * start))
-        b = int(round(n * end))
-        if b <= a:
-            b = min(n, a + 1)
-        section_sentences = sentences[a:b]
-        output += ["", f"{title}:", join_sentences(section_sentences)]
-
-    output += ["", "TRANSCRIÇÃO LIMPA COMPLETA:", working_text]
-    return "\n".join(output).strip()
+    return (
+        "MODE: RAW\n\n"
+        + f"{label}:\n"
+        + "\n\n".join(paragraphs)
+    )
 
 
 
-def parse_structured_sections(structured_text: str) -> Dict[str, List[str]]:
+def parse_raw_sections(structured_text: str) -> Dict[str, List[str]]:
     sections: Dict[str, List[str]] = {}
     current = None
 
-    ignore_keys = {"MODE"}
-
     for raw_line in structured_text.splitlines():
-        line = raw_line.strip()
-        if not line:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            if current:
+                sections[current].append("")
             continue
 
-        if line.endswith(":"):
-            key = line[:-1].strip()
-            if key.upper() not in ignore_keys:
-                current = key
-                sections.setdefault(current, [])
+        if stripped.startswith("MODE:"):
             continue
 
-        if line.startswith("MODE:"):
+        if stripped.endswith(":"):
+            current = stripped[:-1].strip()
+            sections.setdefault(current, [])
             continue
 
         if current is None:
-            current = "OBSERVAÇÃO"
+            current = "CÓPIA DIAGRAMADA"
             sections.setdefault(current, [])
 
-        sections[current].append(line)
+        sections[current].append(stripped)
 
     return sections
 
@@ -496,34 +522,32 @@ def setup_docx_styles(doc: Document):
     styles["Title"].font.size = Pt(20)
     styles["Title"].font.bold = True
 
-    styles["Heading 1"].font.size = Pt(16)
+    styles["Heading 1"].font.size = Pt(15)
     styles["Heading 1"].font.bold = True
     styles["Heading 1"].font.color.rgb = RGBColor(0, 0, 0)
 
-    styles["Heading 2"].font.size = Pt(13)
-    styles["Heading 2"].font.bold = True
-    styles["Heading 2"].font.color.rgb = RGBColor(0, 0, 0)
-
 
 def add_paragraphs(doc: Document, lines: List[str]):
-    text = "\n".join(lines).strip()
-    if not text:
-        text = "[não identificado neste trecho]"
+    buffer = []
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if not paragraphs:
-        paragraphs = [text]
+    def flush():
+        if not buffer:
+            return
+        paragraph_text = " ".join([x.strip() for x in buffer if x.strip()]).strip()
+        buffer.clear()
+        if paragraph_text:
+            p = doc.add_paragraph(style="Normal")
+            p.paragraph_format.space_after = Pt(9)
+            p.paragraph_format.line_spacing = 1.18
+            p.add_run(paragraph_text)
 
-    for paragraph_text in paragraphs:
-        p = doc.add_paragraph(style="Normal")
-        p.paragraph_format.space_after = Pt(8)
-        p.paragraph_format.line_spacing = 1.15
-        p.add_run(paragraph_text)
+    for line in lines:
+        if not line.strip():
+            flush()
+        else:
+            buffer.append(line)
 
-
-def detect_mode_from_structured(structured_text: str) -> str:
-    m = re.search(r"^MODE:\s*(\w+)", structured_text, flags=re.I | re.M)
-    return (m.group(1).upper() if m else "CREATIVE")
+    flush()
 
 
 def create_docx(original_name: str, transcription: Dict[str, Any], structured_text: str, output_path: Path, include_original: bool):
@@ -536,12 +560,14 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
     section.left_margin = Inches(0.75)
     section.right_margin = Inches(0.75)
 
-    mode = detect_mode_from_structured(structured_text)
-    title_text = "Mapa de VSL - Transcrição PT-BR" if mode == "VSL" else "Criativo - Transcrição PT-BR"
+    source_is_pt = is_portuguese_language(transcription.get("language"))
 
     title = doc.add_paragraph(style="Title")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title.add_run(title_text)
+    if source_is_pt:
+        title.add_run("Cópia Crua Diagramada")
+    else:
+        title.add_run("Cópia Traduzida PT-BR")
 
     meta = doc.add_paragraph(style="Normal")
     meta.add_run("Arquivo: ").bold = True
@@ -552,58 +578,24 @@ def create_docx(original_name: str, transcription: Dict[str, Any], structured_te
     meta2.add_run(str(transcription.get("language") or "não identificado"))
 
     meta3 = doc.add_paragraph(style="Normal")
-    meta3.add_run("Modo: ").bold = True
-    meta3.add_run("VSL / Copy longa" if mode == "VSL" else "Criativo curto")
+    meta3.add_run("Formato: ").bold = True
+    meta3.add_run("cópia crua em parágrafos, sem análise de Hook/Body/CTA")
 
     doc.add_paragraph("")
 
-    sections = parse_structured_sections(structured_text)
-
-    preferred_vsl = [
-        "OBSERVAÇÃO",
-        "ABERTURA / HOOK",
-        "PROBLEMA / DOR",
-        "PROMESSA / TRANSFORMAÇÃO",
-        "MECANISMO / SOLUÇÃO",
-        "PROVAS / AUTORIDADE",
-        "OFERTA / BENEFÍCIO CENTRAL",
-        "OBJEÇÕES / GARANTIA / RISCO",
-        "CTA / FECHAMENTO",
-        "TRANSCRIÇÃO LIMPA COMPLETA",
-    ]
-
-    preferred_creative = [
-        "OBSERVAÇÃO",
-        "HOOK",
-        "BODY",
-        "CTA",
-        "TRANSCRIÇÃO LIMPA COMPLETA",
-    ]
-
-    preferred = preferred_vsl if mode == "VSL" else preferred_creative
-    used = set()
-
-    for heading in preferred:
-        if heading in sections:
-            doc.add_heading(heading, level=1)
-            add_paragraphs(doc, sections.get(heading, []))
-            used.add(heading)
+    sections = parse_raw_sections(structured_text)
 
     for heading, lines in sections.items():
-        if heading not in used:
-            doc.add_heading(heading, level=1)
-            add_paragraphs(doc, lines)
+        doc.add_heading(heading, level=1)
+        add_paragraphs(doc, lines)
 
     if include_original:
         original_text = transcription.get("text", "") or ""
+        original_paragraphs = paragraphize_raw_copy(original_text)
         if original_text.strip():
             doc.add_page_break()
             doc.add_heading("TRANSCRIÇÃO ORIGINAL", level=1)
-            for p_text in [x.strip() for x in original_text.split("\n\n") if x.strip()]:
-                p = doc.add_paragraph(style="Normal")
-                p.paragraph_format.space_after = Pt(8)
-                p.paragraph_format.line_spacing = 1.15
-                p.add_run(p_text)
+            add_paragraphs(doc, sum(([p, ""] for p in original_paragraphs), []))
 
     doc.save(output_path)
 
@@ -622,7 +614,7 @@ def process_file(input_path: Path, original_name: str, workdir: Path) -> Path:
 
     include_original = INCLUDE_ORIGINAL_FOR_NON_PT and not source_is_portuguese
 
-    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_v16_copy.docx"
+    output_name = safe_filename(Path(original_name).stem or "transcricao") + "_copia_crua.docx"
     output_path = workdir / output_name
     create_docx(original_name, transcription, structured_text, output_path, include_original=include_original)
     return output_path
