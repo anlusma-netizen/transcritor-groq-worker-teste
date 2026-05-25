@@ -21,7 +21,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 
 
-VERSION = "17.0.0"
+VERSION = "18.0.0"
 
 app = FastAPI(title="Worker Telegram → Groq → DOCX", version=VERSION)
 
@@ -311,7 +311,6 @@ def run_llm_with_retry(prompt: str, index: int, total: int, model: Optional[str]
                 time.sleep(wait_time)
                 continue
 
-            # fallback: se o modelo rápido falhar por indisponibilidade, tenta o modelo principal uma vez
             if selected_model == FAST_TRANSLATION_MODEL and GROQ_TRANSLATION_MODEL != FAST_TRANSLATION_MODEL:
                 print(f"Modelo rápido falhou ({FAST_TRANSLATION_MODEL}). Tentando fallback: {GROQ_TRANSLATION_MODEL}")
                 return run_llm_with_retry(prompt, index, total, model=GROQ_TRANSLATION_MODEL, max_attempts=1)
@@ -320,6 +319,62 @@ def run_llm_with_retry(prompt: str, index: int, total: int, model: Optional[str]
 
     raise RuntimeError(f"Falha ao processar bloco {index}/{total} com {selected_model}: {last_error}")
 
+def looks_like_long_vsl(text: str) -> bool:
+    words = re.findall(r"\w+", text or "", flags=re.UNICODE)
+    # VSL normalmente passa disso; criativo curto fica abaixo.
+    return len(words) >= 260
+
+
+def clean_transcript_text(text: str) -> str:
+    text = (text or "").strip()
+    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\b\]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def split_sentences(text: str) -> List[str]:
+    text = clean_transcript_text(text)
+    if not text:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def join_sentences(items: List[str]) -> str:
+    return " ".join([x.strip() for x in items if x.strip()]).strip() or "[não identificado neste trecho]"
+
+
+def translate_to_ptbr_natural(text: str) -> str:
+    """
+    Tradução/adaptação natural para PT-BR.
+    v18 usa modelo rápido para não travar em áudios em inglês/outros idiomas.
+    """
+    text = clean_transcript_text(text)
+    if not text:
+        return ""
+
+    parts = split_text_for_llm(text, TRANSLATION_CHUNK_CHARS)
+    translated_parts = []
+
+    for i, part in enumerate(parts, start=1):
+        prompt = f"""
+Traduza/adapte para português brasileiro natural.
+
+Regras:
+- Não resuma, não invente e não melhore a copy.
+- Preserve ordem, promessa, objeções, provas, CTA, nomes, números e marcas.
+- Não faça tradução literal robótica.
+- Mantenha termos de marketing comuns em inglês quando fizer sentido: hook, CTA, VSL, lead, offer, pitch, upsell, funnel, checkout.
+- Entregue apenas o texto traduzido/adaptado.
+
+Texto:
+{part}
+""".strip()
+        translated_parts.append(
+            run_llm_with_retry(prompt, i, len(parts), model=FAST_TRANSLATION_MODEL, max_attempts=3)
+        )
+
+    return "\n\n".join(translated_parts).strip()
 
 def prepare_structured_text(text: str, source_is_portuguese: bool) -> str:
     """
